@@ -1275,6 +1275,20 @@ function renderExercises() {
       }
     });
   });
+
+  // Wire up exercise voice buttons
+  list.querySelectorAll('.ex-voice-btn').forEach(function(btn) {
+    (function(exN, voiceBtn) {
+      addTap(voiceBtn, function() {
+        if (voiceBtn.classList.contains('listening')) {
+          stopWorkoutVoice(voiceBtn);
+        } else {
+          startWorkoutVoice(exN, voiceBtn);
+        }
+      });
+    })(btn.dataset.ex, btn);
+  });
+
   save();
 }
 
@@ -2041,6 +2055,211 @@ function saveWeekNote() {
   closeWeekNoteModal();
   renderWeekPlanGrid();
 }
+
+/* ================================================================
+   VOICE INPUT — MEAL LOGGING
+   Listens for something like "2 eggs and a cup of oats"
+   and pre-fills the food name field.
+================================================================ */
+function startMealVoice() {
+  var btn = document.getElementById('food-voice-btn');
+  var badge = document.getElementById('voice-listening-badge');
+
+  // Toggle off if already listening
+  if (btn.classList.contains('listening')) { stopMealVoice(); return; }
+
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    alert('Voice input is not available on this browser.\n\nIt works in:\n• Safari on iOS 14.5+\n• Chrome on Android\n• Chrome / Edge on desktop');
+    return;
+  }
+
+  btn.classList.add('listening'); btn.textContent = '⏹';
+  if (badge) { badge.classList.add('show'); badge.textContent = '🔴 Listening — say the food and amount'; }
+
+  _mealRecognition = new SR();
+  _mealRecognition.lang = 'en-AU';
+  _mealRecognition.continuous = false;
+  _mealRecognition.interimResults = false;
+  _mealRecognition.maxAlternatives = 1;
+
+  _mealRecognition.onresult = function(e) {
+    var transcript = e.results[0][0].transcript.trim();
+    document.getElementById('fi-name').value = transcript;
+    // Attempt to focus next empty field so user can tab through macros
+    var firstEmpty = ['fi-cal','fi-prot','fi-carb','fi-fat'].find(function(id){ return !document.getElementById(id).value; });
+    if (firstEmpty) document.getElementById(firstEmpty).focus();
+  };
+  _mealRecognition.onerror = function(e) {
+    if (e.error !== 'no-speech') alert('Voice error: ' + e.error + '. Try again.');
+  };
+  _mealRecognition.onend = function() { stopMealVoice(); };
+  _mealRecognition.start();
+}
+
+function stopMealVoice() {
+  var btn = document.getElementById('food-voice-btn');
+  var badge = document.getElementById('voice-listening-badge');
+  if (btn)   { btn.classList.remove('listening'); btn.textContent = '🎤'; }
+  if (badge) { badge.classList.remove('show'); }
+  if (_mealRecognition) { try { _mealRecognition.stop(); } catch(e){} _mealRecognition = null; }
+}
+
+/* ================================================================
+   VOICE INPUT — WORKOUT LOGGING
+   Listens for: "3 sets of 12 at 20 kilos" / "12 reps at 50 pounds"
+   Fills the weight + reps fields for the exercise.
+================================================================ */
+function startWorkoutVoice(exName, btn) {
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    alert('Voice input is not available on this browser.\n\nTry: Safari on iOS 14.5+, Chrome on Android, or Chrome/Edge on desktop.');
+    return;
+  }
+
+  // Stop any existing recognition
+  if (_workoutRecognition) { try { _workoutRecognition.stop(); } catch(e){} _workoutRecognition = null; }
+
+  btn.classList.add('listening');
+  btn.textContent = '⏹';
+
+  _workoutRecognition = new SR();
+  _workoutRecognition.lang = 'en-AU';
+  _workoutRecognition.continuous = false;
+  _workoutRecognition.interimResults = false;
+
+  _workoutRecognition.onresult = function(e) {
+    var transcript = e.results[0][0].transcript;
+    parseWorkoutVoice(transcript, exName);
+  };
+  _workoutRecognition.onerror = function(e) {
+    if (e.error !== 'no-speech') alert('Voice error: ' + e.error);
+  };
+  _workoutRecognition.onend = function() { stopWorkoutVoice(btn); };
+  _workoutRecognition.start();
+}
+
+function stopWorkoutVoice(btn) {
+  if (btn) { btn.classList.remove('listening'); btn.textContent = '🎤'; }
+  if (_workoutRecognition) { try { _workoutRecognition.stop(); } catch(e){} _workoutRecognition = null; }
+}
+
+function parseWorkoutVoice(transcript, exName) {
+  var txt = transcript.toLowerCase();
+  var sets = null, reps = null, weight = null;
+  var isKg = /\b(kg|kilos?|kilograms?)\b/.test(txt);
+
+  // Number of sets: "3 sets"
+  var m = txt.match(/\b(\d+)\s*sets?\b/);
+  if (m) sets = +m[1];
+
+  // Reps: "12 reps" or "of 12"
+  m = txt.match(/\b(\d+)\s*reps?\b/) || txt.match(/\bof\s+(\d+)\b/);
+  if (m) reps = +m[1];
+
+  // Weight: "at 20", "20 kg", "20 pounds", "20 kilos"
+  m = txt.match(/\bat\s+(\d+(?:\.\d+)?)\b/) ||
+      txt.match(/\b(\d+(?:\.\d+)?)\s*(?:kg|kilos?|pounds?|lbs?)\b/);
+  if (m) {
+    weight = parseFloat(m[1]);
+    if (isKg) weight = Math.round(weight * 2.2046 * 10) / 10; // convert to lbs
+  }
+
+  // Fallback — if no reps/weight yet, try positional numbers
+  if (reps === null && weight === null) {
+    var nums = txt.match(/\b\d+(?:\.\d+)?\b/g) || [];
+    if (!sets && nums[0])   sets   = +nums[0];
+    if (!reps && nums[1])   reps   = +nums[1];
+    if (!weight && nums[2]) weight = parseFloat(nums[2]);
+  }
+
+  if (reps === null && weight === null) return; // Nothing useful parsed
+
+  var key = dkey();
+  if (!S.workoutLog[key] || !S.workoutLog[key].exercises || !S.workoutLog[key].exercises[exName]) return;
+  var exSets = S.workoutLog[key].exercises[exName];
+
+  // Expand set count if voice specified more sets than currently exist
+  if (sets && sets > 0 && sets <= 8) {
+    while (exSets.length < sets) exSets.push({ weight:'', reps:'', done:false });
+  }
+
+  var count = (sets && sets <= exSets.length) ? sets : exSets.length;
+  for (var i = 0; i < count; i++) {
+    if (reps   !== null) exSets[i].reps   = String(reps);
+    if (weight !== null) exSets[i].weight = String(weight);
+  }
+
+  save();
+  renderExercises();
+}
+
+/* ================================================================
+   PWA SETUP — Manifest + Apple Touch Icon (generated on-device)
+================================================================ */
+(function setupPWA() {
+  // Generate a teal icon using canvas (no external image needed)
+  function generateIcon(size) {
+    var c = document.createElement('canvas');
+    c.width = c.height = size;
+    var ctx = c.getContext('2d');
+    var r = size * 0.22; // corner radius
+    // Rounded rect background
+    ctx.beginPath();
+    ctx.moveTo(r, 0); ctx.lineTo(size-r, 0); ctx.quadraticCurveTo(size, 0, size, r);
+    ctx.lineTo(size, size-r); ctx.quadraticCurveTo(size, size, size-r, size);
+    ctx.lineTo(r, size); ctx.quadraticCurveTo(0, size, 0, size-r);
+    ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+    ctx.closePath();
+    ctx.fillStyle = '#008480';
+    ctx.fill();
+    // "1" glyph centred
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '900 ' + Math.round(size * 0.56) + 'px -apple-system,system-ui,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('1', size / 2, size * 0.54);
+    return c.toDataURL('image/png');
+  }
+
+  try {
+    var icon512 = generateIcon(512);
+
+    // Apple touch icon for iOS Add-to-Home-Screen
+    var appleLink = document.createElement('link');
+    appleLink.rel  = 'apple-touch-icon';
+    appleLink.href = generateIcon(180); // iOS prefers 180px
+    document.head.appendChild(appleLink);
+
+    // Web App Manifest (blob URL) — enables Chrome install prompt on Android
+    var manifest = {
+      name:             'Onetrack',
+      short_name:       'Onetrack',
+      description:      'Personal fitness & nutrition tracker',
+      start_url:        './',
+      display:          'standalone',
+      background_color: '#F5F0EB',
+      theme_color:      '#008480',
+      orientation:      'portrait-primary',
+      icons: [
+        { src: icon512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+        { src: generateIcon(192), sizes: '192x192', type: 'image/png' }
+      ]
+    };
+    var blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+    var mLink = document.createElement('link');
+    mLink.rel  = 'manifest';
+    mLink.href = URL.createObjectURL(blob);
+    document.head.appendChild(mLink);
+  } catch(e) {
+    // Canvas or Blob not available — skip silently
+  }
+
+  // Service worker registration (requires sw.js alongside the HTML on GitHub Pages)
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('./sw.js').catch(function(){ /* sw.js not present — that's OK */ });
+  }
+})();
 </script>
 </body>
 </html>
